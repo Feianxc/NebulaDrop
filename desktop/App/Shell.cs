@@ -77,8 +77,28 @@ namespace NebulaDrop
             ["shootingStars"] = true,
         };
 
+        /// <summary>首次运行时沿用 0.1 版（Electron）的设置与传输记录；证书格式不同，会重新生成。</summary>
+        private static void MigrateFromV01()
+        {
+            if (Program.TestDir.Length > 0 || File.Exists(SettingsFile)) return;
+            var old = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NebulaDrop 星云快传");
+            try
+            {
+                foreach (var name in new[] { "settings.json", "history.json" })
+                {
+                    var src = Path.Combine(old, name);
+                    if (File.Exists(src) && !File.Exists(Path.Combine(Program.DataDir, name))) File.Copy(src, Path.Combine(Program.DataDir, name));
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Error("migrate v0.1", e);
+            }
+        }
+
         private static void LoadState()
         {
+            MigrateFromV01();
             Settings = Defaults();
             var saved = File.Exists(SettingsFile) ? J.Parse(File.ReadAllText(SettingsFile)) : null;
             if (saved != null) foreach (var k in Settings.Keys.ToList()) if (saved.ContainsKey(k) && saved[k] != null) Settings[k] = saved[k];
