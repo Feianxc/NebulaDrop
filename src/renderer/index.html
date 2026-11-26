@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>NebulaDrop 星云快传</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <canvas id="sky" aria-hidden="true"></canvas>
+
+  <header class="titlebar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <ellipse cx="16" cy="16" rx="14" ry="6" transform="rotate(-24 16 16)" fill="none" stroke="currentColor" stroke-opacity=".55" stroke-width="1.4"/>
+        <circle cx="16" cy="16" r="5" fill="var(--gold)"/>
+        <circle cx="27.5" cy="10.6" r="2" fill="var(--cyan)"/>
+      </svg>
+      <span class="brand-name">星云快传</span>
+      <span class="brand-sub">NebulaDrop</span>
+    </div>
+    <div class="self-chip" id="selfChip" title="本机信息">
+      <span class="dot"></span><span id="selfText">正在启动…</span>
+    </div>
+  </header>
+
+  <nav class="rail" aria-label="主导航">
+    <button class="rail-btn active" data-page="chart" aria-label="星图">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><ellipse cx="12" cy="12" rx="9.5" ry="4.2" transform="rotate(-25 12 12)"/></svg>
+      <span>星图</span>
+    </button>
+    <button class="rail-btn" data-page="log" aria-label="记录">
+      <svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h9"/></svg>
+      <span>记录</span><i class="badge" id="activeBadge" hidden>0</i>
+    </button>
+    <button class="rail-btn" data-page="settings" aria-label="设置">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M5.5 18.5l2.1-2.1M16.4 7.6l2.1-2.1"/></svg>
+      <span>设置</span>
+    </button>
+    <button class="rail-btn rail-bottom" id="openInbox" aria-label="接收文件夹" title="打开接收文件夹">
+      <svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>
+      <span>收件夹</span>
+    </button>
+  </nav>
+
+  <main>
+    <!-- 星图：选择目标并发送 -->
+    <section class="page active" id="page-chart">
+      <div class="chart" id="chart">
+        <svg class="orbits" id="orbits" aria-hidden="true"></svg>
+        <div class="sun" id="sun">
+          <div class="sun-core"></div>
+          <div class="sun-label"><b id="sunName">本机</b><small id="sunIp"></small></div>
+        </div>
+        <div id="planets"></div>
+        <div class="chart-empty" id="chartEmpty">
+          <div class="sweep"></div>
+          <p class="empty-title">正在搜寻附近的设备</p>
+          <p class="empty-text">同一 Wi-Fi 或热点下打开 NebulaDrop / LocalSend 的设备会出现在轨道上。<br>迟迟没有出现？试试扫描网段，或直接输入对方 IP。</p>
+          <div class="row center">
+            <button class="btn" data-act="scan">扫描网段</button>
+            <button class="btn ghost" data-act="add">输入 IP 添加</button>
+          </div>
+        </div>
+        <div class="drop-hint" id="dropHint" hidden><span>把文件拖到一颗星球上，松手即发送</span></div>
+      </div>
+
+      <aside class="panel">
+        <div class="target" id="target"></div>
+        <div class="panel-head">
+          <h2>附近设备 <span class="count" id="devCount">0</span></h2>
+          <div class="row tight">
+            <button class="icon-btn" data-act="refresh" title="重新广播发现"><svg viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4h-4"/></svg></button>
+            <button class="icon-btn" data-act="scan" title="扫描网段"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg></button>
+            <button class="icon-btn" data-act="add" title="输入 IP 添加"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+          </div>
+        </div>
+        <div class="scan-bar" id="scanBar" hidden><i></i><span></span></div>
+        <ul class="dev-list" id="devList"></ul>
+        <div class="active-list" id="activeMini"></div>
+      </aside>
+    </section>
+
+    <!-- 记录 -->
+    <section class="page" id="page-log">
+      <div class="log-grid">
+        <div class="card log-col">
+          <div class="card-head"><h2>传输记录</h2><button class="btn ghost small" id="clearHistory">清空记录</button></div>
+          <ul class="t-list" id="tList"></ul>
+        </div>
+        <div class="card log-col narrow">
+          <div class="card-head"><h2>收到的文字</h2></div>
+          <ul class="m-list" id="mList"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section class="page" id="page-settings">
+      <form class="settings" id="settingsForm" autocomplete="off">
+        <div class="card">
+          <h2>本机</h2>
+          <label class="field"><span>设备名称</span><input name="alias" maxlength="40" required></label>
+          <label class="field"><span>端口</span><input name="port" type="number" min="1024" max="65535"><em>默认 53317，与 LocalSend 相同才能互通；被占用时会自动顺延。</em></label>
+          <label class="field"><span>接收 PIN 码</span><input name="pin" maxlength="12" placeholder="留空表示不需要"><em>设置后，对方发送前必须输入该 PIN。</em></label>
+        </div>
+        <div class="card">
+          <h2>接收</h2>
+          <div class="field"><span>保存位置</span>
+            <div class="row"><input name="saveDir" readonly><button type="button" class="btn ghost small" id="pickSaveDir">更改</button></div>
+          </div>
+          <label class="switch"><input type="checkbox" name="autoOpen"><i></i><span>接收完成后自动打开文件所在位置并选中文件</span></label>
+          <label class="switch"><input type="checkbox" name="autoAccept"><i></i><span>自动接收（不弹窗确认）</span></label>
+          <label class="switch"><input type="checkbox" name="notify"><i></i><span>系统通知</span></label>
+          <label class="switch"><input type="checkbox" name="minimizeToTray"><i></i><span>关闭窗口时最小化到托盘，继续接收</span></label>
+        </div>
+        <div class="card">
+          <h2>星空</h2>
+          <label class="field"><span>星星密度</span><input type="range" name="starDensity" min="0.3" max="2" step="0.1"></label>
+          <label class="switch"><input type="checkbox" name="shootingStars"><i></i><span>流星</span></label>
+          <p class="note">系统开启“减少动画”时，星空保持静止。</p>
+        </div>
+        <div class="card about">
+          <h2>关于</h2>
+          <p>NebulaDrop <span id="ver"></span> · 兼容 LocalSend 协议 v2，可与手机、电脑上的 LocalSend 互传。</p>
+          <p class="note">连接热点的设备与路由器下的设备之间，NebulaDrop 会自动识别 NAT 并改走反向通道。</p>
+        </div>
+        <div class="settings-actions"><button class="btn" type="submit">保存设置</button></div>
+      </form>
+    </section>
+  </main>
+
+  <div class="modal-layer" id="modalLayer" hidden></div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="starfield.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
