@@ -92,28 +92,52 @@ function chunk(type, data) {
   const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td));
   return Buffer.concat([len, td, crc]);
 }
-const raw = Buffer.alloc(N * (N * 4 + 1));
-for (let y = 0; y < N; y++) {
-  raw[y * (N * 4 + 1)] = 0;
-  for (let x = 0; x < N; x++) {
-    const o = (y * N + x) * 4;
-    const a = px[o + 3];
-    const p = y * (N * 4 + 1) + 1 + x * 4;
-    raw[p] = a ? Math.round(Math.min(255, px[o] / a)) : 0;
-    raw[p + 1] = a ? Math.round(Math.min(255, px[o + 1] / a)) : 0;
-    raw[p + 2] = a ? Math.round(Math.min(255, px[o + 2] / a)) : 0;
-    raw[p + 3] = Math.round(a * 255);
+/** 把预乘颜色缓冲按面积平均缩小到 size，并编码为 PNG。 */
+function encodePng(size) {
+  const f = N / size;
+  const raw = Buffer.alloc(size * (size * 4 + 1));
+  for (let y = 0; y < size; y++) {
+    raw[y * (size * 4 + 1)] = 0;
+    for (let x = 0; x < size; x++) {
+      let r = 0, g = 0, b = 0, a = 0, cnt = 0;
+      for (let yy = Math.floor(y * f); yy < Math.floor((y + 1) * f); yy++) {
+        for (let xx = Math.floor(x * f); xx < Math.floor((x + 1) * f); xx++) {
+          const o = (yy * N + xx) * 4;
+          r += px[o]; g += px[o + 1]; b += px[o + 2]; a += px[o + 3]; cnt++;
+        }
+      }
+      r /= cnt; g /= cnt; b /= cnt; a /= cnt;
+      const p = y * (size * 4 + 1) + 1 + x * 4;
+      raw[p] = a ? Math.round(Math.min(255, r / a)) : 0;
+      raw[p + 1] = a ? Math.round(Math.min(255, g / a)) : 0;
+      raw[p + 2] = a ? Math.round(Math.min(255, b / a)) : 0;
+      raw[p + 3] = Math.round(a * 255);
+    }
   }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(size, 0); ihdr.writeUInt32BE(size, 4); ihdr[8] = 8; ihdr[9] = 6;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0)),
+  ]);
 }
-const ihdr = Buffer.alloc(13);
-ihdr.writeUInt32BE(N, 0); ihdr.writeUInt32BE(N, 4); ihdr[8] = 8; ihdr[9] = 6;
-const png = Buffer.concat([
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0)),
-]);
+const png = encodePng(256);
+// ICO：内嵌多尺寸 PNG（Vista 起支持），供窗口、任务栏与托盘使用
+const sizes = [16, 24, 32, 48, 64, 256];
+const images = sizes.map((s) => encodePng(s));
+const header = Buffer.alloc(6 + 16 * sizes.length);
+header.writeUInt16LE(0, 0); header.writeUInt16LE(1, 2); header.writeUInt16LE(sizes.length, 4);
+let offset = header.length;
+sizes.forEach((s, i) => {
+  const e = 6 + 16 * i;
+  header[e] = s === 256 ? 0 : s; header[e + 1] = s === 256 ? 0 : s;
+  header.writeUInt16LE(1, e + 4); header.writeUInt16LE(32, e + 6);
+  header.writeUInt32LE(images[i].length, e + 8); header.writeUInt32LE(offset, e + 12);
+  offset += images[i].length;
+});
+const ico = Buffer.concat([header, ...images]);
 const root = path.join(__dirname, '..');
-for (const out of ['build/icon.png', 'src/assets/icon.png']) {
-  fs.mkdirSync(path.dirname(path.join(root, out)), { recursive: true });
-  fs.writeFileSync(path.join(root, out), png);
-}
-console.log('icon written', png.length, 'bytes');
+fs.mkdirSync(path.join(root, 'build'), { recursive: true });
+fs.writeFileSync(path.join(root, 'build/icon.png'), png);
+fs.writeFileSync(path.join(root, 'build/icon.ico'), ico);
+console.log('icon written', png.length, 'bytes png,', ico.length, 'bytes ico');

@@ -25,10 +25,16 @@ const ICONS = {
   down: '<svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg>',
 };
 const devIcon = (t) => ICONS[t] || ICONS.desktop;
-const HUES = [205, 188, 32, 158, 338, 48, 222, 12, 172, 280];
+const MINI_KIND = { desktop: 'giant', server: 'giant', headless: 'giant', mobile: 'rock', web: 'ice' };
+function miniPlanet(d, size) {
+  const kind = MINI_KIND[d.deviceType] || 'giant';
+  return `<div class="mini-planet kind-${kind}" style="--h:${hueOf(d.fingerprint)};--size:${size}px;--lx:-.72;--ly:-.69"><i class="surface"></i><i class="shade"></i><span class="mini-badge">${devIcon(d.deviceType)}</span></div>`;
+}
+// 行星色相：彼此间隔明显的 10 种，按设备指纹（FNV-1a 哈希）固定分配
+const HUES = [28, 198, 342, 262, 8, 152, 46, 222, 300, 118];
 function hueOf(fp) {
-  let h = 0;
-  for (const c of String(fp)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  let h = 0x811c9dc5;
+  for (const c of String(fp)) { h ^= c.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
   return HUES[h % HUES.length];
 }
 function fmtBytes(n) {
@@ -69,7 +75,7 @@ function toast(text, kind = '', action) {
 const modals = [];
 function openModal(html, { onMount, dismissable = true, key } = {}) {
   const el = document.createElement('div');
-  el.className = 'modal';
+  el.className = 'modal glass';
   el.setAttribute('role', 'dialog');
   el.innerHTML = html;
   const entry = { el, dismissable, key, close };
@@ -152,59 +158,112 @@ function renderSelf() {
 }
 
 // ---------- 星图 ----------
+// 场景层次（同一层叠上下文，按 y 排序产生前后遮挡）：
+//   后半轨道 SVG → 恒星（z = 中心 y）→ 行星（z = 自身 y）→ 前半轨道 → 彗星粒子画布
 const chart = $('#chart');
-const svg = $('#orbits');
+const orbitsBack = $('#orbitsBack');
+const orbitsFront = $('#orbitsFront');
+const sunEl = $('#sun');
+const fx = $('#fx');
+const fxCtx = fx.getContext('2d');
 const planetsEl = $('#planets');
 const planetNodes = new Map();
-let geo = { cx: 0, cy: 0, rings: [], tilt: 0.7 };
+let geo = { cx: 0, cy: 0, rings: [], tilt: 0.46, w: 0, h: 0, dpr: 1 };
 let spin = 0;
 let lastT = performance.now();
+const comets = [];
+const pulses = [];
+const SVGNS = 'http://www.w3.org/2000/svg';
+
+const KIND = { desktop: 'giant', server: 'giant', headless: 'giant', mobile: 'rock', web: 'ice' };
+const kindOf = (t) => KIND[t] || 'giant';
+const BODY = { giant: 46, rock: 34, ice: 38 };
 
 function layoutChart() {
   const r = chart.getBoundingClientRect();
+  if (!r.width || !r.height) return;
   const cx = r.width / 2;
-  const cy = r.height / 2;
-  const base = Math.max(150, Math.min(r.width / 2 - 95, (r.height / 2 - 64) / geo.tilt));
-  geo = { ...geo, cx, cy, rings: [base * 0.6, base * 0.81, base * 1.0] };
-  svg.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
-  const rings = geo.rings.map((rr) => `<ellipse class="ring" cx="${cx}" cy="${cy}" rx="${rr}" ry="${rr * geo.tilt}"/>`).join('');
-  svg.innerHTML = `${rings}<g id="routes"></g>`;
-  for (const n of planetNodes.values()) { n.route = null; n.flow = null; }
-  placePlanets();
+  const cy = r.height / 2 + 4;
+  // 内圈必须绕开恒星光晕（顶点纵向距离 > 恒星半径 + 行星半径 + 余量），外圈尽量用满画布
+  const outer = Math.max(190, Math.min(r.width / 2 - 70, (r.height / 2 - 74) / geo.tilt));
+  const inner = Math.min(outer - 50, Math.max(136, outer * 0.5));
+  geo = { ...geo, cx, cy, w: r.width, h: r.height, rings: [inner, (inner + outer) / 2, outer], dpr: Math.min(window.devicePixelRatio || 1, 2) };
+  fx.width = Math.round(r.width * geo.dpr);
+  fx.height = Math.round(r.height * geo.dpr);
+  for (const s of [orbitsBack, orbitsFront]) s.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
+  // 椭圆轨道拆成后半（恒星之后）与前半（恒星之前），前半更亮，营造景深
+  const arc = (rr, front) => {
+    const ry = rr * geo.tilt;
+    return front
+      ? `M ${cx + rr} ${cy} A ${rr} ${ry} 0 0 1 ${cx - rr} ${cy}`
+      : `M ${cx - rr} ${cy} A ${rr} ${ry} 0 0 1 ${cx + rr} ${cy}`;
+  };
+  const defs = `<defs>
+    <linearGradient id="ringFront" x1="0" x2="1"><stop offset="0" stop-color="#a9b8ff" stop-opacity=".04"/><stop offset=".5" stop-color="#c3ceff" stop-opacity=".34"/><stop offset="1" stop-color="#a9b8ff" stop-opacity=".04"/></linearGradient>
+    <linearGradient id="ringBack" x1="0" x2="1"><stop offset="0" stop-color="#a9b8ff" stop-opacity=".03"/><stop offset=".5" stop-color="#a9b8ff" stop-opacity=".13"/><stop offset="1" stop-color="#a9b8ff" stop-opacity=".03"/></linearGradient>
+    <radialGradient id="plane" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffcf6e" stop-opacity=".07"/><stop offset=".55" stop-color="#6f8bff" stop-opacity=".035"/><stop offset="1" stop-color="#6f8bff" stop-opacity="0"/></radialGradient>
+  </defs>`;
+  const plane = geo.rings[2] * 1.12;
+  orbitsBack.innerHTML = `${defs}<ellipse cx="${cx}" cy="${cy}" rx="${plane}" ry="${plane * geo.tilt}" fill="url(#plane)"/>
+    ${geo.rings.map((rr) => `<path class="ring-back" d="${arc(rr, false)}"/>`).join('')}<g id="routes"></g>`;
+  orbitsFront.innerHTML = `${defs}${geo.rings.map((rr) => `<path class="ring-front" d="${arc(rr, true)}"/>`).join('')}`;
+  orbitsFront.style.zIndex = String(Math.round(cy) - 1);
+  sunEl.style.zIndex = String(Math.round(cy));
+  sunEl.style.left = `${cx}px`;
+  sunEl.style.top = `${cy}px`;
+  for (const n of planetNodes.values()) n.route = null;
+  placePlanets(performance.now());
 }
 
 function planetSlots() {
-  // 设备按轨道均匀分布：内圈 4 个、中圈 6 个、外圈其余
-  const list = [...S.devices];
-  const caps = [4, 6, 99];
+  // 设备轮流分到中、外、内三条轨道（每条最多 4/6/3 个，再多都放外圈），同一轨道内等角分布
+  const order = [1, 2, 0];
+  const caps = [3, 4, 99];
+  const byRing = [[], [], []];
+  for (const d of S.devices) {
+    let ring = order[byRing.reduce((a, b) => a + b.length, 0) % 3];
+    if (byRing[ring].length >= caps[ring]) ring = byRing[1].length < caps[1] ? 1 : 2;
+    byRing[ring].push(d);
+  }
   const slots = new Map();
-  let idx = 0;
-  caps.forEach((cap, ring) => {
-    const part = list.slice(idx, idx + cap);
-    idx += part.length;
+  byRing.forEach((part, ring) => {
     part.forEach((d, j) => {
-      const offset = (hueOf(d.fingerprint) / 360) * 0.6 + ring * 0.9;
+      const offset = ring * 2.1 + 0.6 + (hueOf(d.fingerprint) / 360) * 0.4;
       slots.set(d.fingerprint, { ring, angle: (j / part.length) * Math.PI * 2 + offset });
     });
   });
   return slots;
 }
 
+function planetMarkup(d) {
+  const kind = kindOf(d.deviceType);
+  return `
+    <div class="pwrap">
+      <svg class="pring" viewBox="0 0 100 100"><circle class="track" cx="50" cy="50" r="46"/><circle class="bar" cx="50" cy="50" r="46" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"/></svg>
+      ${kind === 'giant' ? '<i class="pband back"></i>' : ''}
+      <button class="pbody" aria-label="${esc(d.alias)}"><i class="surface"></i><i class="shade"></i></button>
+      ${kind === 'giant' ? '<i class="pband front"></i>' : ''}
+      ${kind === 'rock' ? '<i class="moon"></i>' : ''}
+      <i class="halo"></i>
+    </div>
+    <div class="planet-label"><b></b><small></small></div>`;
+}
+
 function renderPlanets() {
   const slots = planetSlots();
   for (const [fp, n] of planetNodes) {
-    if (!slots.has(fp)) { n.el.remove(); n.route?.remove(); n.flow?.remove(); planetNodes.delete(fp); }
+    if (!slots.has(fp)) { n.el.remove(); n.route?.remove(); planetNodes.delete(fp); }
   }
   for (const d of S.devices) {
     let n = planetNodes.get(d.fingerprint);
-    if (!n) {
+    const kind = kindOf(d.deviceType);
+    if (!n || n.kind !== kind) {
+      if (n) { n.el.remove(); n.route?.remove(); }
       const el = document.createElement('div');
-      el.className = 'planet';
+      el.className = `planet kind-${kind}`;
       el.style.setProperty('--h', hueOf(d.fingerprint));
-      el.innerHTML = `
-        <svg class="planet-ring" viewBox="0 0 68 68"><circle class="track" cx="34" cy="34" r="31"/><circle class="bar" cx="34" cy="34" r="31" stroke-dasharray="194.8" stroke-dashoffset="194.8"/></svg>
-        <button class="planet-body" aria-label="${esc(d.alias)}"></button>
-        <div class="planet-label"><b></b><small></small></div>`;
+      el.style.setProperty('--size', `${BODY[kind]}px`);
+      el.innerHTML = planetMarkup(d);
       el.addEventListener('click', () => select(d.fingerprint));
       el.addEventListener('mouseenter', () => { S.hover = true; });
       el.addEventListener('mouseleave', () => { S.hover = false; });
@@ -215,24 +274,23 @@ function renderPlanets() {
         e.preventDefault(); e.stopPropagation();
         el.classList.remove('drop-over');
         hideDrop();
-        const paths = filesFromDrop(e);
-        if (paths.length) { select(d.fingerprint); sendFiles(d.fingerprint, paths); }
+        const files = filesFromDrop(e);
+        if (files.length) { select(d.fingerprint); sendDropped(d.fingerprint, files); }
       });
       planetsEl.appendChild(el);
-      n = { el, fp: d.fingerprint };
+      n = { el, fp: d.fingerprint, kind, moonPhase: (hueOf(d.fingerprint) / 60) % (Math.PI * 2) };
       planetNodes.set(d.fingerprint, n);
     }
     n.slot = slots.get(d.fingerprint);
     n.el.classList.toggle('offline', !d.online);
     n.el.classList.toggle('selected', S.selected === d.fingerprint);
-    n.el.querySelector('.planet-body').innerHTML = devIcon(d.deviceType);
-    const tag = d.tunnel ? '<span class="tag tunnel">反向通道</span>' : d.natted ? '<span class="tag nat">NAT</span>' : '';
+    const tag = d.tunnel ? '<span class="tag tunnel">反向通道</span>' : d.natted ? '<span class="tag nat">NAT</span>' : !d.nebula ? '<span class="tag ls">LocalSend</span>' : '';
     n.el.querySelector('.planet-label b').innerHTML = `${esc(d.alias)}${tag}`;
-    n.el.querySelector('.planet-label small').textContent = d.ip || '';
+    n.el.querySelector('.planet-label small').innerHTML = `${devIcon(d.deviceType)}<span>${esc(d.ip || '')}</span>`;
   }
   $('#chartEmpty').hidden = S.devices.length > 0;
   updateProgressRings();
-  placePlanets();
+  placePlanets(performance.now());
 }
 
 function activeFor(fp) {
@@ -242,18 +300,20 @@ function activeFor(fp) {
 function updateProgressRings() {
   for (const [fp, n] of planetNodes) {
     const act = activeFor(fp);
-    const bar = n.el.querySelector('.planet-ring .bar');
-    if (!act.length) { bar.setAttribute('stroke-dashoffset', '194.8'); continue; }
+    const bar = n.el.querySelector('.pring .bar');
+    n.el.classList.toggle('busy', act.length > 0);
+    if (!act.length) { bar.setAttribute('stroke-dashoffset', '100'); continue; }
     const tot = act.reduce((a, t) => a + t.totalBytes, 0);
     const done = act.reduce((a, t) => a + t.doneBytes, 0);
-    const p = tot ? done / tot : 0;
-    bar.setAttribute('stroke-dashoffset', String(194.8 * (1 - p)));
-    bar.style.stroke = act.some((t) => t.direction === 'send') ? 'var(--gold)' : 'var(--cyan)';
+    bar.setAttribute('stroke-dashoffset', String(100 * (1 - (tot ? done / tot : 0))));
+    n.el.classList.toggle('incoming', !act.some((t) => t.direction === 'send'));
   }
+  sunEl.classList.toggle('busy', [...S.transfers.values()].some((t) => !FINAL.includes(t.status)));
 }
 
-function placePlanets() {
-  const routes = svg.querySelector('#routes');
+function placePlanets(now) {
+  const routes = orbitsBack.querySelector('#routes');
+  const maxRy = (geo.rings[2] || 1) * geo.tilt;
   for (const n of planetNodes.values()) {
     if (!n.slot) continue;
     const rr = geo.rings[n.slot.ring] || geo.rings[2];
@@ -261,39 +321,147 @@ function placePlanets() {
     const a = n.slot.angle + spin * speed;
     const x = geo.cx + Math.cos(a) * rr;
     const y = geo.cy + Math.sin(a) * rr * geo.tilt;
-    n.el.style.transform = `translate(${x}px, ${y}px)`;
+    // 景深：靠前（下方）更大更亮，靠后更小更暗
+    const depth = (y - geo.cy) / maxRy; // -1 … 1
+    const scale = 0.84 + (0.2 * (depth + 1)) / 2;
+    n.pos = { x, y, scale };
+    n.el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+    n.el.style.setProperty('--s', scale.toFixed(3));
+    n.el.style.setProperty('--dim', (0.78 + (0.22 * (depth + 1)) / 2).toFixed(3));
     n.el.style.zIndex = String(Math.round(y));
-    // 位于恒星上方且离得近的星球，把名字放到星球上面，避免压住中央的本机标签
-    n.el.classList.toggle('label-up', y < geo.cy && geo.cy - y < 150 && Math.abs(x - geo.cx) < 120);
+    // 受光方向：指向恒星的单位向量，驱动晨昏线与边缘光
+    const dx = geo.cx - x, dy = geo.cy - y;
+    const L = Math.hypot(dx, dy) || 1;
+    n.el.style.setProperty('--lx', (dx / L).toFixed(3));
+    n.el.style.setProperty('--ly', (dy / L).toFixed(3));
+    n.el.classList.toggle('label-up', y < geo.cy - 8);
+    if (n.kind === 'rock') {
+      const moon = n.el.querySelector('.moon');
+      const ma = n.moonPhase + now / 2600;
+      const mx = Math.cos(ma) * 30, my = Math.sin(ma) * 10;
+      moon.style.transform = `translate(${mx.toFixed(1)}px, ${my.toFixed(1)}px)`;
+      moon.style.zIndex = my < 0 ? '0' : '3';
+    }
     if (!routes) continue;
-    if (!n.route) {
-      n.route = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    const sel = S.selected === n.fp;
+    if (sel && !n.route) {
+      n.route = document.createElementNS(SVGNS, 'path');
       n.route.setAttribute('class', 'route');
       routes.appendChild(n.route);
+    } else if (!sel && n.route) { n.route.remove(); n.route = null; }
+    if (n.route) {
+      const c = curveCtrl(geo.cx, geo.cy, x, y);
+      n.route.setAttribute('d', `M ${geo.cx} ${geo.cy} Q ${c.x} ${c.y} ${x} ${y}`);
     }
-    n.route.setAttribute('x1', geo.cx); n.route.setAttribute('y1', geo.cy);
-    n.route.setAttribute('x2', x); n.route.setAttribute('y2', y);
-    n.route.classList.toggle('selected', S.selected === n.fp);
-    const act = activeFor(n.fp).filter((t) => t.status === 'transferring' || t.status === 'waiting');
-    if (act.length) {
-      if (!n.flow) {
-        n.flow = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        routes.appendChild(n.flow);
-      }
-      n.flow.setAttribute('class', `flow${act[0].direction === 'receive' ? ' in' : ''}`);
-      // 光流从发送方指向接收方
-      n.flow.setAttribute('x1', geo.cx); n.flow.setAttribute('y1', geo.cy);
-      n.flow.setAttribute('x2', x); n.flow.setAttribute('y2', y);
-    } else if (n.flow) { n.flow.remove(); n.flow = null; }
   }
+}
+
+// 航线是一条略微上拱的二次贝塞尔曲线
+function curveCtrl(x0, y0, x1, y1) {
+  const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+  const dx = x1 - x0, dy = y1 - y0;
+  const L = Math.hypot(dx, dy) || 1;
+  let nx = -dy / L, ny = dx / L;
+  if (ny > 0) { nx = -nx; ny = -ny; }
+  return { x: mx + nx * L * 0.16, y: my + ny * L * 0.16 };
+}
+const qpt = (p0, c, p1, t) => ({
+  x: (1 - t) * (1 - t) * p0.x + 2 * (1 - t) * t * c.x + t * t * p1.x,
+  y: (1 - t) * (1 - t) * p0.y + 2 * (1 - t) * t * c.y + t * t * p1.y,
+});
+
+const COMET = { send: [255, 207, 110], receive: [111, 211, 255] };
+const tinted = {};
+function tintGlow(rgb) {
+  const k = rgb.join(',');
+  if (tinted[k]) return tinted[k];
+  const c = document.createElement('canvas');
+  c.width = c.height = 48;
+  const g = c.getContext('2d');
+  const gr = g.createRadialGradient(24, 24, 0, 24, 24, 24);
+  gr.addColorStop(0, 'rgba(255,255,255,1)');
+  gr.addColorStop(0.12, `rgba(${k},0.9)`);
+  gr.addColorStop(0.4, `rgba(${k},0.25)`);
+  gr.addColorStop(1, `rgba(${k},0)`);
+  g.fillStyle = gr;
+  g.fillRect(0, 0, 48, 48);
+  return (tinted[k] = c);
+}
+
+function drawFx(dt, now) {
+  const g = fxCtx;
+  g.setTransform(geo.dpr, 0, 0, geo.dpr, 0, 0);
+  g.clearRect(0, 0, geo.w, geo.h);
+  g.globalCompositeOperation = 'lighter';
+  const sun = { x: geo.cx, y: geo.cy };
+  const active = [...S.transfers.values()].filter((t) => t.status === 'transferring' || t.status === 'waiting');
+  for (const t of active) {
+    const n = planetNodes.get(t.peer.fingerprint);
+    if (!n || !n.pos) continue;
+    const c = curveCtrl(sun.x, sun.y, n.pos.x, n.pos.y);
+    const rgb = COMET[t.direction] || COMET.send;
+    // 航线微光
+    g.strokeStyle = `rgba(${rgb.join(',')},${t.status === 'waiting' ? 0.1 : 0.2})`;
+    g.lineWidth = 1;
+    g.beginPath(); g.moveTo(sun.x, sun.y); g.quadraticCurveTo(c.x, c.y, n.pos.x, n.pos.y); g.stroke();
+    const rate = t.status === 'waiting' ? 4 : 28; // 每秒粒子数
+    if (Math.random() < (rate * dt) / 1000) {
+      comets.push({ t: 0, life: 850 + Math.random() * 500, fp: t.peer.fingerprint, dir: t.direction, rgb, size: 0.6 + Math.random() * 0.7 });
+    }
+  }
+  for (let i = comets.length - 1; i >= 0; i--) {
+    const p = comets[i];
+    p.t += dt / p.life;
+    const n = planetNodes.get(p.fp);
+    if (p.t >= 1 || !n || !n.pos) { comets.splice(i, 1); continue; }
+    // 粒子跟随行星实时位置：发送时从恒星飞向行星，接收时反向
+    const c = curveCtrl(sun.x, sun.y, n.pos.x, n.pos.y);
+    const e = p.t < 0.5 ? 2 * p.t * p.t : 1 - Math.pow(-2 * p.t + 2, 2) / 2;
+    const u = p.dir === 'send' ? e : 1 - e;
+    const tail = p.dir === 'send' ? Math.max(0, u - 0.07) : Math.min(1, u + 0.07);
+    const pos = qpt(sun, c, n.pos, u);
+    const prev = qpt(sun, c, n.pos, tail);
+    const fade = Math.sin(Math.PI * p.t);
+    const k = p.rgb.join(',');
+    const grad = g.createLinearGradient(pos.x, pos.y, prev.x, prev.y);
+    grad.addColorStop(0, `rgba(${k},${0.85 * fade})`);
+    grad.addColorStop(1, `rgba(${k},0)`);
+    g.strokeStyle = grad;
+    g.lineWidth = 1.5 * p.size;
+    g.lineCap = 'round';
+    g.beginPath(); g.moveTo(prev.x, prev.y); g.lineTo(pos.x, pos.y); g.stroke();
+    const s = 16 * p.size;
+    g.globalAlpha = fade;
+    g.drawImage(tintGlow(p.rgb), pos.x - s / 2, pos.y - s / 2, s, s);
+    g.globalAlpha = 1;
+  }
+  for (let i = pulses.length - 1; i >= 0; i--) {
+    const p = pulses[i];
+    const k = (now - p.t0) / 1200;
+    if (k >= 1) { pulses.splice(i, 1); continue; }
+    const n = planetNodes.get(p.fp);
+    const at = p.atSun || !n || !n.pos ? sun : n.pos;
+    const r = 16 + k * 50;
+    g.strokeStyle = `rgba(${p.rgb.join(',')},${(1 - k) * 0.75})`;
+    g.lineWidth = 2 * (1 - k) + 0.4;
+    g.beginPath(); g.ellipse(at.x, at.y, r, r * 0.78, 0, 0, Math.PI * 2); g.stroke();
+  }
+  g.globalCompositeOperation = 'source-over';
+}
+
+function celebrate(t) {
+  pulses.push({ fp: t.peer.fingerprint, t0: performance.now(), rgb: COMET[t.direction] || COMET.send, atSun: t.direction === 'receive' });
 }
 
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 function tick(t) {
   const dt = Math.min(100, t - lastT);
   lastT = t;
-  if (!S.hover && !reduceMotion.matches && S.page === 'chart') spin += dt * (Math.PI * 2 / 240000);
-  if (S.page === 'chart') placePlanets();
+  if (S.page === 'chart') {
+    if (!S.hover && !reduceMotion.matches) spin += dt * (Math.PI * 2 / 300000);
+    placePlanets(t);
+    drawFx(reduceMotion.matches ? 0 : dt, t);
+  }
   requestAnimationFrame(tick);
 }
 new ResizeObserver(() => layoutChart()).observe(chart);
@@ -321,15 +489,15 @@ function renderTarget() {
   }
   el.innerHTML = `
     <div class="target-head">
-      <div class="mini-planet" style="--h:${hueOf(d.fingerprint)}">${devIcon(d.deviceType)}</div>
+      ${miniPlanet(d, 46)}
       <div><div class="target-name">${esc(d.alias)}</div>
       <div class="target-meta">${esc(d.ip || '')}${d.port && d.port !== 53317 ? ':' + d.port : ''} · ${esc(d.deviceModel || d.deviceType || '')}</div></div>
     </div>
     ${routeNote(d)}
     <div class="send-grid">
-      <button class="send-btn" data-send="file">${ICONS.file}<span>发送文件</span></button>
-      <button class="send-btn" data-send="folder">${ICONS.folder}<span>发送文件夹</span></button>
-      <button class="send-btn" data-send="text">${ICONS.text}<span>发送文字</span></button>
+      <button class="send-btn" data-send="file"><span class="chip">${ICONS.file}</span><span>发送文件</span></button>
+      <button class="send-btn" data-send="folder"><span class="chip">${ICONS.folder}</span><span>发送文件夹</span></button>
+      <button class="send-btn" data-send="text"><span class="chip">${ICONS.text}</span><span>发送文字</span></button>
     </div>`;
   el.querySelector('[data-send=file]').onclick = async () => { const p = await api.pickFiles(); if (p.length) sendFiles(d.fingerprint, p); };
   el.querySelector('[data-send=folder]').onclick = async () => { const p = await api.pickFolder(); if (p.length) sendFiles(d.fingerprint, p); };
@@ -346,7 +514,7 @@ function renderDevices() {
   } else {
     ul.innerHTML = S.devices.map((d) => `
       <li class="dev-item ${d.online ? '' : 'offline'} ${S.selected === d.fingerprint ? 'selected' : ''}" data-fp="${esc(d.fingerprint)}" tabindex="0">
-        <div class="mini-planet" style="--h:${hueOf(d.fingerprint)}">${devIcon(d.deviceType)}</div>
+        ${miniPlanet(d, 32)}
         <div class="dev-text"><b>${esc(d.alias)}${d.tunnel ? '<span class="tag tunnel">反向通道</span>' : d.natted ? '<span class="tag nat">NAT</span>' : ''}${d.nebula ? '' : '<span class="tag ls">LocalSend</span>'}</b>
         <small>${esc(d.ip || '')}${d.online ? '' : ' · 离线'}</small></div>
       </li>`).join('');
@@ -407,7 +575,14 @@ function composeText(d) {
 // ---------- 拖放 ----------
 let dragDepth = 0;
 function filesFromDrop(e) {
-  return [...(e.dataTransfer?.files || [])].map((f) => api.pathForFile(f)).filter(Boolean);
+  return [...(e.dataTransfer?.files || [])];
+}
+// 拖入的文件交给宿主解析真实路径后发送；需要 PIN 时用宿主返回的路径重试
+async function sendDropped(fp, files) {
+  const d = deviceBy(fp);
+  toast(`正在连接 ${d ? d.alias : '对方'}…`);
+  const r = await api.dropFiles(fp, files);
+  handleSendResult(r, (p) => sendFiles(fp, r.paths || [], p));
 }
 function hideDrop() { dragDepth = 0; $('#dropHint').hidden = true; }
 window.addEventListener('dragenter', (e) => {
@@ -422,10 +597,10 @@ window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => {
   e.preventDefault();
   hideDrop();
-  const paths = filesFromDrop(e);
-  if (!paths.length) return;
+  const files = filesFromDrop(e);
+  if (!files.length) return;
   const d = deviceBy(S.selected);
-  if (d) sendFiles(d.fingerprint, paths);
+  if (d) sendDropped(d.fingerprint, files);
   else toast('请把文件拖到一颗星球上，或先选择目标设备', 'err');
 });
 
@@ -535,6 +710,7 @@ api.onTransfer((t) => {
   renderMiniActive();
   updateProgressRings();
   if (S.page === 'log' && !logTimer) logTimer = setTimeout(() => { logTimer = 0; renderLog(); }, 300);
+  if (t.status === 'done' && prev && prev.status !== 'done') celebrate(t);
   if (t.direction === 'receive' && t.status === 'done' && prev && prev.status !== 'done') {
     const p = revealTarget(t);
     toast(`已收到来自 ${t.peer.alias} 的 ${t.files.length} 个文件`, 'ok', p && !S.settings.autoOpen ? { label: '打开位置', fn: () => api.reveal(p) } : null);
@@ -546,8 +722,10 @@ api.onRequest((req) => {
   const total = req.files.reduce((a, f) => a + f.size, 0);
   const shown = req.files.slice(0, 200);
   openModal(`
-    <h3>${esc(req.sender.alias)} 想发给你 ${req.files.length} 个文件</h3>
-    <p class="sub">共 ${fmtBytes(total)}${req.mode === 'tunnel' ? ' · 经反向通道' : ''} · 保存到 ${esc(S.settings.saveDir)}</p>
+    <div class="modal-head">${miniPlanet(req.sender, 44)}<div>
+      <h3>${esc(req.sender.alias)} 想发给你 ${req.files.length} 个文件</h3>
+      <p class="sub">共 ${fmtBytes(total)}${req.mode === 'tunnel' ? ' · 经反向通道' : ''}</p></div></div>
+    <p class="sub">保存到 ${esc(S.settings.saveDir)}</p>
     <ul class="modal-files">${shown.map((f) => `<li><span title="${esc(f.name)}">${esc(f.name)}</span><span>${fmtBytes(f.size)}</span></li>`).join('')}
     ${req.files.length > shown.length ? `<li><span>…还有 ${req.files.length - shown.length} 个</span><span></span></li>` : ''}</ul>
     <div class="modal-actions"><button class="btn ghost" data-no>拒绝</button><button class="btn" data-yes autofocus>接收</button></div>`, {

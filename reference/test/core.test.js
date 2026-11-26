@@ -6,8 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { NebulaNode } = require('../src/core/node');
-const U = require('../src/core/util');
+const { NebulaNode } = require('../core/node');
+const U = require('../core/util');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nebuladrop-test-'));
 let portSeed = 47100 + Math.floor(Math.random() * 400);

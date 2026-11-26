@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { NebulaNode } = require('../src/core/node');
+const { NebulaNode } = require('./core/node');
 
 const dir = process.argv[2];
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nebula-peers-'));
@@ -23,7 +23,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   for (const p of peers) { await p.start(); await p.registerTo('127.0.0.1', port, 'https'); }
   console.log('peers registered to', port);
   const [desk, phone, laptop] = peers;
-  await wait(6000);
+  await wait(12000);
   const big = path.join(work, '星空素材包');
   fs.mkdirSync(path.join(big, '照片'), { recursive: true });
   const fd = fs.openSync(path.join(big, '旅行视频.mp4'), 'w');
